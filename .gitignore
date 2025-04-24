@@ -8,8 +8,8 @@
 /package-lock.json
 
 # production
-/dist
-/build
+/static
+/data
 
 # misc
 .DS_Store
@@ -21,8 +21,10 @@
 /.env.local
 .env
 .history
-
-/config
-/log
-/db
-/manual_log
+.version.ts
+/.tmp
+__pycache__
+/shell/preload/env.*
+/shell/preload/notify.*
+/shell/preload/*-notify.json
+/shell/preload/__ql_notify__.*

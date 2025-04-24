@@ -1,91 +1,148 @@
-import React, { PureComponent, Fragment, useState, useEffect } from 'react';
-import { Button, notification, Modal } from 'antd';
+import intl from 'react-intl-universal';
+import React, {
+  PureComponent,
+  Fragment,
+  useState,
+  useEffect,
+  useRef,
+} from 'react';
+import { Button, message, Modal, TreeSelect } from 'antd';
 import config from '@/utils/config';
 import { PageContainer } from '@ant-design/pro-layout';
-import { Controlled as CodeMirror } from 'react-codemirror2';
 import { request } from '@/utils/http';
+import Editor from '@monaco-editor/react';
+import CodeMirror from '@uiw/react-codemirror';
+import { useOutletContext } from '@umijs/max';
+import { SharedContext } from '@/layouts';
+import { langs } from '@uiw/codemirror-extensions-langs';
+import { useHotkeys } from 'react-hotkeys-hook';
+import { getEditorMode } from '@/utils';
 
 const Config = () => {
-  const [width, setWdith] = useState('100%');
-  const [marginLeft, setMarginLeft] = useState(0);
-  const [marginTop, setMarginTop] = useState(-72);
+  const { headerStyle, isPhone, theme } = useOutletContext<SharedContext>();
   const [value, setValue] = useState('');
   const [loading, setLoading] = useState(true);
+  const [title, setTitle] = useState('config.sh');
+  const [select, setSelect] = useState('config.sh');
+  const [data, setData] = useState<any[]>([]);
+  const editorRef = useRef<any>(null);
+  const [confirmLoading, setConfirmLoading] = useState(false);
+  const [language, setLanguage] = useState<string>('shell');
 
-  const getConfig = () => {
+  const getConfig = (name: string) => {
+    request
+      .get(`${config.apiPrefix}configs/detail?path=${encodeURIComponent(name)}`)
+      .then(({ code, data }) => {
+        if (code === 200) {
+          setValue(data);
+        }
+      });
+  };
+
+  const getFiles = () => {
     setLoading(true);
     request
-      .get(`${config.apiPrefix}config/config`)
-      .then((data) => {
-        setValue(data.data);
+      .get(`${config.apiPrefix}configs/files`)
+      .then(({ code, data }) => {
+        if (code === 200) {
+          setData(data);
+        }
       })
       .finally(() => setLoading(false));
   };
 
   const updateConfig = () => {
+    setConfirmLoading(true);
+    const content = editorRef.current
+      ? editorRef.current.getValue().replace(/\r\n/g, '\n')
+      : value;
+
     request
-      .post(`${config.apiPrefix}save`, {
-        data: { content: value, name: 'config.sh' },
-      })
-      .then((data) => {
-        notification.success({
-          message: data.msg,
-        });
+      .post(`${config.apiPrefix}configs/save`, { content, name: select })
+      .then(({ code, data }) => {
+        if (code === 200) {
+          message.success(intl.get('保存成功'));
+        }
+        setConfirmLoading(false);
       });
   };
 
+  const onSelect = (value: any, node: any) => {
+    setSelect(value);
+    setTitle(node.value);
+    getConfig(node.value);
+    const newMode = getEditorMode(value);
+    setLanguage(newMode);
+  };
+
+  useHotkeys(
+    'mod+s',
+    (e) => {
+      updateConfig();
+    },
+    { enableOnFormTags: ['textarea'], preventDefault: true },
+  );
+
   useEffect(() => {
-    if (document.body.clientWidth < 768) {
-      setWdith('auto');
-      setMarginLeft(0);
-      setMarginTop(0);
-    } else {
-      setWdith('100%');
-      setMarginLeft(0);
-      setMarginTop(-72);
-    }
-    getConfig();
+    getFiles();
+    getConfig('config.sh');
   }, []);
 
   return (
     <PageContainer
-      className="code-mirror-wrapper"
-      title="config.sh"
+      className="ql-container-wrapper config-wrapper"
+      title={title}
+      loading={loading}
       extra={[
-        <Button key="1" type="primary" onClick={updateConfig}>
-          保存
+        <TreeSelect
+          treeExpandAction="click"
+          className="config-select"
+          value={select}
+          dropdownStyle={{ maxHeight: 400, overflow: 'auto' }}
+          treeData={data}
+          key="value"
+          defaultValue="config.sh"
+          onSelect={onSelect}
+        />,
+        <Button
+          key="1"
+          loading={confirmLoading}
+          type="primary"
+          onClick={updateConfig}
+        >
+          {intl.get('保存')}
         </Button>,
       ]}
       header={{
-        style: {
-          padding: '4px 16px 4px 15px',
-          position: 'sticky',
-          top: 0,
-          left: 0,
-          zIndex: 20,
-          marginTop,
-          width,
-          marginLeft,
-        },
-      }}
-      style={{
-        height: '100vh',
+        style: headerStyle,
       }}
     >
-      <CodeMirror
-        value={value}
-        options={{
-          lineNumbers: true,
-          lineWrapping: true,
-          styleActiveLine: true,
-          matchBrackets: true,
-          mode: 'shell',
-        }}
-        onBeforeChange={(editor, data, value) => {
-          setValue(value);
-        }}
-        onChange={(editor, data, value) => {}}
-      />
+      {isPhone ? (
+        <CodeMirror
+          value={value}
+          theme={theme.includes('dark') ? 'dark' : 'light'}
+          extensions={[langs.shell()]}
+          onChange={(value) => {
+            setValue(value);
+          }}
+        />
+      ) : (
+        <Editor
+          language={language}
+          value={value}
+          theme={theme}
+          options={{
+            fontSize: 12,
+            lineNumbersMinChars: 3,
+            folding: false,
+            glyphMargin: false,
+            accessibilitySupport: 'off'
+          }}
+          onMount={(editor) => {
+            editorRef.current = editor;
+          }}
+        />
+      )}
     </PageContainer>
   );
 };

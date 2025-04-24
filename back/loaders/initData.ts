@@ -1,99 +1,217 @@
+import DependenceService from '../services/dependence';
+import { exec } from 'child_process';
 import { Container } from 'typedi';
-import { Crontab, CrontabStatus } from '../data/cron';
+import { Crontab, CrontabModel, CrontabStatus } from '../data/cron';
 import CronService from '../services/cron';
-
-const initData = [
-  {
-    name: '更新面板',
-    command: `sleep ${randomSchedule(
-      60,
-      1,
-    )} && git_pull >> $QL_DIR/log/git_pull.log 2>&1`,
-    schedule: `${randomSchedule(60, 1)} ${randomSchedule(
-      24,
-      7,
-    ).toString()} * * *`,
-    status: CrontabStatus.idle,
-  },
-  {
-    name: 'build面板',
-    command: 'rebuild >> ${QL_DIR}/log/rebuild.log 2>&1',
-    schedule: '30 7 */7 * *',
-    status: CrontabStatus.disabled,
-  },
-  {
-    name: '自定义仓库',
-    command: `sleep ${randomSchedule(
-      60,
-      1,
-    )} && diy https://ghproxy.com/https://github.com/whyour/hundun.git "quanx/jx|quanx/jd" tokens >> $QL_DIR/log/diy_pull.log 2>&1`,
-    schedule: `${randomSchedule(60, 1)} ${randomSchedule(
-      24,
-      6,
-    ).toString()} * * *`,
-    status: CrontabStatus.idle,
-  },
-  {
-    name: '互助码导出',
-    command: 'export_sharecodes',
-    schedule: '48 5 * * *',
-    status: CrontabStatus.idle,
-  },
-  {
-    name: '删除日志',
-    command: 'rm_log >/dev/null 2>&1',
-    schedule: '30 7 */7 * *',
-    status: CrontabStatus.disabled,
-  },
-  {
-    name: '重置密码',
-    command: 'js resetpwd',
-    schedule: '33 6 */7 * *',
-    status: CrontabStatus.disabled,
-  },
-  {
-    name: '运行所有脚本(慎用)',
-    command: 'js runall',
-    schedule: '33 6 */7 * *',
-    status: CrontabStatus.disabled,
-  },
-];
+import EnvService from '../services/env';
+import { DependenceModel, DependenceStatus } from '../data/dependence';
+import { Op } from 'sequelize';
+import config from '../config';
+import { CrontabViewModel, CronViewType } from '../data/cronView';
+import { initPosition } from '../data/env';
+import { AuthDataType, SystemModel } from '../data/system';
+import SystemService from '../services/system';
+import UserService from '../services/user';
+import { writeFile, readFile } from 'fs/promises';
+import { createRandomString, safeJSONParse } from '../config/util';
+import OpenService from '../services/open';
+import { shareStore } from '../shared/store';
+import Logger from './logger';
+import { AppModel } from '../data/open';
 
 export default async () => {
   const cronService = Container.get(CronService);
-  const cronDb = cronService.getDb();
+  const envService = Container.get(EnvService);
+  const dependenceService = Container.get(DependenceService);
+  const systemService = Container.get(SystemService);
+  const userService = Container.get(UserService);
+  const openService = Container.get(OpenService);
 
-  cronDb.count({}, async (err, count) => {
-    const data = initData.map((x) => {
-      const tab = new Crontab(x);
-      tab.created = new Date().valueOf();
-      tab.saved = false;
-      if (tab.name === '更新面板') {
-        tab.isSystem = 1;
-      } else {
-        tab.isSystem = 0;
-      }
-      return tab;
+  // 初始化增加系统配置
+  let systemApp = (
+    await AppModel.findOne({
+      where: { name: 'system' },
+    })
+  )?.get({ plain: true });
+  if (!systemApp) {
+    systemApp = await AppModel.create({
+      name: 'system',
+      scopes: ['crons', 'system'],
+      client_id: createRandomString(12, 12),
+      client_secret: createRandomString(24, 24),
     });
-    if (count === 0) {
-      cronDb.insert(data);
-      await cronService.autosave_crontab();
+  }
+  const [systemConfig] = await SystemModel.findOrCreate({
+    where: { type: AuthDataType.systemConfig },
+  });
+  await SystemModel.findOrCreate({
+    where: { type: AuthDataType.notification },
+  });
+  const [authConfig] = await SystemModel.findOrCreate({
+    where: { type: AuthDataType.authConfig },
+  });
+  if (!authConfig?.info) {
+    let authInfo = {
+      username: 'admin',
+      password: 'admin',
+    };
+    try {
+      const content = await readFile(config.authConfigFile, 'utf8');
+      authInfo = safeJSONParse(content);
+    } catch (error) {
+      Logger.warn('Failed to read auth config file, using default credentials');
+    }
+    await SystemModel.upsert({
+      id: authConfig?.id,
+      info: authInfo,
+      type: AuthDataType.authConfig,
+    });
+  }
+
+  const installDependencies = () => {
+    // 初始化时安装所有处于安装中，安装成功，安装失败的依赖
+    DependenceModel.findAll({
+      where: {},
+      order: [
+        ['type', 'DESC'],
+        ['createdAt', 'DESC'],
+      ],
+      raw: true,
+    }).then(async (docs) => {
+      await DependenceModel.update(
+        { status: DependenceStatus.queued, log: [] },
+        { where: { id: docs.map((x) => x.id!) } },
+      );
+      setTimeout(() => {
+        dependenceService.installDependenceOneByOne(docs);
+      }, 5000);
+    });
+  };
+
+  // 初始化更新 linux/python/nodejs 镜像源配置
+  if (systemConfig.info?.pythonMirror) {
+    systemService.updatePythonMirror({
+      pythonMirror: systemConfig.info?.pythonMirror,
+    });
+  }
+  if (systemConfig.info?.linuxMirror) {
+    systemService.updateLinuxMirror(
+      {
+        linuxMirror: systemConfig.info?.linuxMirror,
+      },
+      undefined,
+      () => installDependencies(),
+    );
+  } else {
+    installDependencies();
+  }
+  if (systemConfig.info?.nodeMirror) {
+    systemService.updateNodeMirror({
+      nodeMirror: systemConfig.info?.nodeMirror,
+    });
+  }
+
+  // 初始化新增默认全部任务视图
+  CrontabViewModel.findAll({
+    where: { type: CronViewType.系统, name: '全部任务' },
+    raw: true,
+  }).then((docs) => {
+    if (docs.length === 0) {
+      CrontabViewModel.create({
+        name: '全部任务',
+        type: CronViewType.系统,
+        position: initPosition / 2,
+      });
     }
   });
-};
 
-function randomSchedule(from: number, to: number) {
-  const result = [];
-  const arr = [...Array(from).keys()];
-  let count = arr.length;
-  for (let i = 0; i < to; i++) {
-    const index = ~~(Math.random() * count) + i;
-    if (result.includes(arr[index])) {
-      continue;
+  // 初始化更新所有任务状态为空闲
+  await CrontabModel.update({ status: CrontabStatus.idle }, { where: {} });
+
+  // 初始化时执行一次所有的 ql repo 任务
+  CrontabModel.findAll({
+    where: {
+      isDisabled: { [Op.ne]: 1 },
+      command: {
+        [Op.or]: [{ [Op.like]: `%ql repo%` }, { [Op.like]: `%ql raw%` }],
+      },
+    },
+  }).then((docs) => {
+    for (let i = 0; i < docs.length; i++) {
+      const doc = docs[i];
+      if (doc) {
+        exec(doc.command);
+      }
     }
-    result[i] = arr[index];
-    arr[index] = arr[i];
-    count--;
+  });
+
+  // 更新2.11.3以前的脚本路径
+  CrontabModel.findAll({
+    where: {
+      command: {
+        [Op.or]: [
+          { [Op.like]: `%\/${config.rootPath}\/scripts\/%` },
+          { [Op.like]: `%\/${config.rootPath}\/config\/%` },
+          { [Op.like]: `%\/${config.rootPath}\/log\/%` },
+          { [Op.like]: `%\/${config.rootPath}\/db\/%` },
+        ],
+      },
+    },
+  }).then(async (docs) => {
+    for (let i = 0; i < docs.length; i++) {
+      const doc = docs[i];
+      if (doc) {
+        if (doc.command.includes(`${config.rootPath}/scripts/`)) {
+          await CrontabModel.update(
+            { command: doc.command.replace(`${config.rootPath}/scripts/`, '') },
+            { where: { id: doc.id } },
+          );
+        }
+        if (doc.command.includes(`${config.rootPath}/log/`)) {
+          await CrontabModel.update(
+            {
+              command: `${config.dataPath}/log/${doc.command.replace(
+                `${config.rootPath}/log/`,
+                '',
+              )}`,
+            },
+            { where: { id: doc.id } },
+          );
+        }
+        if (doc.command.includes(`${config.rootPath}/config/`)) {
+          await CrontabModel.update(
+            {
+              command: `${config.dataPath}/config/${doc.command.replace(
+                `${config.rootPath}/config/`,
+                '',
+              )}`,
+            },
+            { where: { id: doc.id } },
+          );
+        }
+        if (doc.command.includes(`${config.rootPath}/db/`)) {
+          await CrontabModel.update(
+            {
+              command: `${config.dataPath}/db/${doc.command.replace(
+                `${config.rootPath}/db/`,
+                '',
+              )}`,
+            },
+            { where: { id: doc.id } },
+          );
+        }
+      }
+    }
+  });
+
+  // 初始化保存一次ck和定时任务数据
+  await cronService.autosave_crontab();
+  await envService.set_envs();
+
+  const authInfo = await userService.getAuthInfo();
+  const apps = await openService.findApps();
+  await shareStore.updateAuthInfo(authInfo);
+  if (apps?.length) {
+    await shareStore.updateApps(apps);
   }
-  return result;
-}
+};

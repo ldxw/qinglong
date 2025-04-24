@@ -1,21 +1,39 @@
-import { defineConfig } from 'umi';
+import { defineConfig } from '@umijs/max';
 const CompressionPlugin = require('compression-webpack-plugin');
 
+const baseUrl = process.env.QlBaseUrl || '/';
 export default defineConfig({
   hash: true,
-  layout: false,
-  nodeModulesTransform: {
-    type: 'none',
+  jsMinifier: 'terser',
+  antd: {},
+  locale: {
+    antd: true,
+    title: true,
+    baseNavigator: true,
   },
-  fastRefresh: {},
-  favicon: 'https://qinglong.whyour.cn/g5.ico',
+  outputPath: 'static/dist',
+  fastRefresh: true,
+  favicons: [`https://qn.whyour.cn/favicon.svg`],
+  publicPath: process.env.NODE_ENV === 'production' ? './' : '/',
   proxy: {
-    '/api': {
-      target: 'http://127.0.0.1:5678/',
+    [`${baseUrl}api/update`]: {
+      target: 'http://127.0.0.1:5300/',
       changeOrigin: true,
+      pathRewrite: { [`^${baseUrl}api/update`]: '/api' },
+    },
+    [`${baseUrl}api/public`]: {
+      target: 'http://127.0.0.1:5400/',
+      changeOrigin: true,
+      pathRewrite: { [`^${baseUrl}api/public`]: '/api' },
+    },
+    [`${baseUrl}api`]: {
+      target: 'http://127.0.0.1:5600/',
+      changeOrigin: true,
+      ws: true,
+      pathRewrite: { [`^${baseUrl}api`]: '/api' },
     },
   },
-  chainWebpack: (config) => {
+  chainWebpack: ((config: any) => {
     config.plugin('compression-webpack-plugin').use(
       new CompressionPlugin({
         algorithm: 'gzip',
@@ -24,18 +42,13 @@ export default defineConfig({
         minRatio: 0.6,
       }),
     );
-  },
-  externals: {
-    react: 'window.React',
-    'react-dom': 'window.ReactDOM',
-    codemirror: 'window.CodeMirror',
-    darkreader: 'window.DarkReader',
-  },
-  scripts: [
-    'https://gw.alipayobjects.com/os/lib/react/16.13.1/umd/react.production.min.js',
-    'https://gw.alipayobjects.com/os/lib/react-dom/16.13.1/umd/react-dom.production.min.js',
-    'https://cdn.jsdelivr.net/npm/codemirror@5.60.0/lib/codemirror.min.js',
-    'https://cdn.jsdelivr.net/npm/darkreader@4.9.27/darkreader.min.js',
-    'https://cdn.jsdelivr.net/npm/codemirror@5.60.0/mode/shell/shell.js',
+  }) as any,
+  headScripts: [`./api/env.js`],
+  copy: [
+    {
+      from: 'node_modules/monaco-editor/min/vs',
+      to: 'static/dist/monaco-editor/min/vs',
+    },
   ],
+  npmClient: 'pnpm',
 });

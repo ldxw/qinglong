@@ -1,154 +1,417 @@
-import React, { PureComponent, Fragment, useState, useEffect } from 'react';
+import useTableScrollHeight from '@/hooks/useTableScrollHeight';
+import { SharedContext } from '@/layouts';
+import { getCommandScript, getCrontabsNextDate } from '@/utils';
+import config from '@/utils/config';
+import { diffTime } from '@/utils/date';
+import { request } from '@/utils/http';
+import {
+  CheckCircleOutlined,
+  CheckOutlined,
+  ClockCircleOutlined,
+  CloseCircleOutlined,
+  CopyOutlined,
+  DeleteOutlined,
+  DownOutlined,
+  EditOutlined,
+  EllipsisOutlined,
+  FieldTimeOutlined,
+  Loading3QuartersOutlined,
+  PlusOutlined,
+  PushpinOutlined,
+  SettingOutlined,
+  StopOutlined,
+  UnorderedListOutlined,
+} from '@ant-design/icons';
+import { PageContainer } from '@ant-design/pro-layout';
+import { history, useOutletContext } from '@umijs/max';
 import {
   Button,
-  notification,
-  Modal,
-  Table,
-  Tag,
-  Space,
-  Tooltip,
   Dropdown,
-  Menu,
-  Typography,
   Input,
+  MenuProps,
+  message,
+  Modal,
+  Space,
+  Table,
+  TablePaginationConfig,
+  Tabs,
+  Tag,
+  Typography,
 } from 'antd';
-import {
-  ClockCircleOutlined,
-  SyncOutlined,
-  CloseCircleOutlined,
-  FileTextOutlined,
-  EllipsisOutlined,
-  PlayCircleOutlined,
-  CheckCircleOutlined,
-  EditOutlined,
-  StopOutlined,
-  DeleteOutlined,
-} from '@ant-design/icons';
-import config from '@/utils/config';
-import { PageContainer } from '@ant-design/pro-layout';
-import { request } from '@/utils/http';
-import CronModal from './modal';
+import { ColumnProps } from 'antd/lib/table';
+import { FilterValue, SorterResult } from 'antd/lib/table/interface';
+import dayjs from 'dayjs';
+import { noop, omit } from 'lodash';
+import React, { useEffect, useRef, useState } from 'react';
+import intl from 'react-intl-universal';
+import { useVT } from 'virtualizedtableforantd4';
+import { getScheduleType } from './const';
+import CronDetailModal from './detail';
+import './index.less';
 import CronLogModal from './logModal';
+import CronModal, { CronLabelModal } from './modal';
+import {
+  CrontabStatus,
+  ICrontab,
+  OperationName,
+  OperationPath,
+  ScheduleType,
+} from './type';
+import ViewCreateModal from './viewCreateModal';
+import ViewManageModal from './viewManageModal';
 
-const { Text } = Typography;
+const { Text, Paragraph, Link } = Typography;
 const { Search } = Input;
-
-enum CrontabStatus {
-  'running',
-  'idle',
-  'disabled',
-}
+const SHOW_TAB_COUNT = 10;
 
 const Crontab = () => {
-  const columns = [
+  const { headerStyle, isPhone, theme } = useOutletContext<SharedContext>();
+  const columns: ColumnProps<ICrontab>[] = [
     {
-      title: '任务名',
+      title: intl.get('名称'),
       dataIndex: 'name',
       key: 'name',
-      align: 'center' as const,
+      fixed: 'left',
+      width: 120,
       render: (text: string, record: any) => (
-        <span>{record.name || record._id}</span>
+        <Paragraph
+          style={{
+            wordBreak: 'break-all',
+            marginBottom: 0,
+            color: '#1890ff',
+            cursor: 'pointer',
+          }}
+          ellipsis={{ tooltip: text, rows: 2 }}
+          onClick={() => {
+            setDetailCron(record);
+            setIsDetailModalVisible(true);
+          }}
+        >
+          <Link>{record.name || '-'}</Link>
+        </Paragraph>
       ),
-    },
-    {
-      title: '任务',
-      dataIndex: 'command',
-      key: 'command',
-      width: '40%',
-      align: 'center' as const,
-      render: (text: string, record: any) => {
-        return (
-          <span
-            style={{
-              textAlign: 'left',
-              width: '100%',
-              display: 'inline-block',
-              wordBreak: 'break-all',
-            }}
-          >
-            {text}
-          </span>
-        );
+      sorter: {
+        compare: (a, b) => a?.name?.localeCompare(b?.name),
       },
     },
     {
-      title: '任务定时',
-      dataIndex: 'schedule',
-      key: 'schedule',
-      align: 'center' as const,
+      title: intl.get('命令/脚本'),
+      dataIndex: 'command',
+      key: 'command',
+      width: 240,
+      render: (text, record) => {
+        return (
+          <Paragraph
+            style={{
+              wordBreak: 'break-all',
+              marginBottom: 0,
+            }}
+            ellipsis={{ tooltip: text, rows: 2 }}
+          >
+            <a
+              onClick={() => {
+                goToScriptManager(record);
+              }}
+            >
+              {text}
+            </a>
+          </Paragraph>
+        );
+      },
+      sorter: {
+        compare: (a: any, b: any) => a.command.localeCompare(b.command),
+      },
     },
     {
-      title: '状态',
+      title: intl.get('状态'),
       key: 'status',
       dataIndex: 'status',
-      align: 'center' as const,
-      render: (text: string, record: any) => (
+      width: 100,
+      filters: [
+        {
+          text: intl.get('运行中'),
+          value: CrontabStatus.running,
+        },
+        {
+          text: intl.get('空闲中'),
+          value: CrontabStatus.idle,
+        },
+        {
+          text: intl.get('已禁用'),
+          value: CrontabStatus.disabled,
+        },
+        {
+          text: intl.get('队列中'),
+          value: CrontabStatus.queued,
+        },
+      ],
+      render: (text, record) => (
         <>
-          {record.status === CrontabStatus.idle && (
-            <Tag icon={<ClockCircleOutlined />} color="default">
-              空闲中
-            </Tag>
+          {(!record.isDisabled || record.status !== CrontabStatus.idle) && (
+            <>
+              {record.status === CrontabStatus.idle && (
+                <Tag icon={<ClockCircleOutlined />} color="default">
+                  {intl.get('空闲中')}
+                </Tag>
+              )}
+              {record.status === CrontabStatus.running && (
+                <Tag
+                  icon={<Loading3QuartersOutlined spin />}
+                  color="processing"
+                >
+                  {intl.get('运行中')}
+                </Tag>
+              )}
+              {record.status === CrontabStatus.queued && (
+                <Tag icon={<FieldTimeOutlined />} color="default">
+                  {intl.get('队列中')}
+                </Tag>
+              )}
+            </>
           )}
-          {record.status === CrontabStatus.running && (
-            <Tag icon={<SyncOutlined spin />} color="processing">
-              运行中
-            </Tag>
-          )}
-          {record.status === CrontabStatus.disabled && (
+          {record.isDisabled === 1 && record.status === CrontabStatus.idle && (
             <Tag icon={<CloseCircleOutlined />} color="error">
-              已禁用
+              {intl.get('已禁用')}
             </Tag>
           )}
         </>
       ),
     },
     {
-      title: '操作',
+      title: intl.get('定时规则'),
+      dataIndex: 'schedule',
+      key: 'schedule',
+      width: 150,
+      sorter: {
+        compare: (a, b) => a.schedule.localeCompare(b.schedule),
+      },
+      render: (text, record) => {
+        return (
+          <Paragraph
+            style={{
+              wordBreak: 'break-all',
+              marginBottom: 0,
+            }}
+            ellipsis={{
+              tooltip: {
+                placement: 'right',
+                title: (
+                  <>
+                    <div>{text}</div>
+                    {record.extra_schedules?.map((x) => (
+                      <div key={x.schedule}>{x.schedule}</div>
+                    ))}
+                  </>
+                ),
+              },
+              rows: 2,
+            }}
+          >
+            {text}
+          </Paragraph>
+        );
+      },
+    },
+    {
+      title: intl.get('最后运行时长'),
+      width: 167,
+      dataIndex: 'last_running_time',
+      key: 'last_running_time',
+      sorter: {
+        compare: (a: any, b: any) => {
+          return a.last_running_time - b.last_running_time;
+        },
+      },
+      render: (text, record) => {
+        return record.last_running_time
+          ? diffTime(record.last_running_time)
+          : '-';
+      },
+    },
+    {
+      title: intl.get('最后运行时间'),
+      dataIndex: 'last_execution_time',
+      key: 'last_execution_time',
+      width: 141,
+      sorter: {
+        compare: (a, b) => {
+          return (a.last_execution_time || 0) - (b.last_execution_time || 0);
+        },
+      },
+      render: (text, record) => {
+        return (
+          <span
+            style={{
+              display: 'block',
+            }}
+          >
+            {record.last_execution_time
+              ? dayjs(record.last_execution_time * 1000).format(
+                  'YYYY-MM-DD HH:mm:ss',
+                )
+              : '-'}
+          </span>
+        );
+      },
+    },
+    {
+      title: intl.get('下次运行时间'),
+      width: 144,
+      sorter: {
+        compare: (a: any, b: any) => {
+          return a.nextRunTime - b.nextRunTime;
+        },
+      },
+      render: (text, record) => {
+        return record.nextRunTime
+          ? dayjs(record.nextRunTime).format('YYYY-MM-DD HH:mm:ss')
+          : '-';
+      },
+    },
+    {
+      title: intl.get('关联订阅'),
+      width: 185,
+      render: (text, record: any) => record?.subscription?.name || '-',
+    },
+    {
+      title: intl.get('操作'),
       key: 'action',
-      align: 'center' as const,
-      render: (text: string, record: any, index: number) => (
-        <Space size="middle">
-          <Tooltip title="运行">
+      width: 140,
+      fixed: isPhone ? undefined : 'right',
+      render: (text, record, index) => {
+        const isPc = !isPhone;
+        return (
+          <Space size="middle">
+            {record.status === CrontabStatus.idle && (
+              <a
+                onClick={(e) => {
+                  e.stopPropagation();
+                  runCron(record, index);
+                }}
+              >
+                {intl.get('运行')}
+              </a>
+            )}
+            {record.status !== CrontabStatus.idle && (
+              <a
+                onClick={(e) => {
+                  e.stopPropagation();
+                  stopCron(record, index);
+                }}
+              >
+                {intl.get('停止')}
+              </a>
+            )}
             <a
-              onClick={() => {
-                runCron(record, index);
-              }}
-            >
-              <PlayCircleOutlined />
-            </a>
-          </Tooltip>
-          <Tooltip title="日志">
-            <a
-              onClick={() => {
+              onClick={(e) => {
+                e.stopPropagation();
                 setLogCron({ ...record, timestamp: Date.now() });
               }}
             >
-              <FileTextOutlined />
+              {intl.get('日志')}
             </a>
-          </Tooltip>
-          <MoreBtn key="more" record={record} index={index} />
-        </Space>
-      ),
+            <MoreBtn key="more" record={record} index={index} />
+          </Space>
+        );
+      },
     },
   ];
 
-  const [width, setWdith] = useState('100%');
-  const [marginLeft, setMarginLeft] = useState(0);
-  const [marginTop, setMarginTop] = useState(-72);
   const [value, setValue] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [isModalVisible, setIsModalVisible] = useState(false);
+  const [isLabelModalVisible, setIsLabelModalVisible] = useState(false);
   const [editedCron, setEditedCron] = useState();
   const [searchText, setSearchText] = useState('');
   const [isLogModalVisible, setIsLogModalVisible] = useState(false);
   const [logCron, setLogCron] = useState<any>();
+  const [selectedRowIds, setSelectedRowIds] = useState<string[]>([]);
+  const [pageConf, setPageConf] = useState<{
+    page: number;
+    size: number;
+    sorter: any;
+    filters: any;
+  }>({} as any);
+  const [viewConf, setViewConf] = useState<any>();
+  const [isDetailModalVisible, setIsDetailModalVisible] = useState(false);
+  const [detailCron, setDetailCron] = useState<any>();
+  const [searchValue, setSearchValue] = useState('');
+  const [total, setTotal] = useState<number>();
+  const [isCreateViewModalVisible, setIsCreateViewModalVisible] =
+    useState(false);
+  const [isViewManageModalVisible, setIsViewManageModalVisible] =
+    useState(false);
+  const [cronViews, setCronViews] = useState<any[]>([]);
+  const [enabledCronViews, setEnabledCronViews] = useState<any[]>([]);
+  const [moreMenuActive, setMoreMenuActive] = useState(false);
+  const tableRef = useRef<HTMLDivElement>(null);
+  const tableScrollHeight = useTableScrollHeight(tableRef);
+  const [activeKey, setActiveKey] = useState('');
+
+  const goToScriptManager = (record: any) => {
+    const result = getCommandScript(record.command);
+    if (Array.isArray(result)) {
+      const [s, p] = result;
+      history.push(`/script?p=${p}&s=${s}`);
+    } else if (result) {
+      location.href = result;
+    }
+  };
 
   const getCrons = () => {
     setLoading(true);
+    const { page, size, sorter, filters } = pageConf;
+    let url = `${
+      config.apiPrefix
+    }crons?searchValue=${searchText}&page=${page}&size=${size}&filters=${JSON.stringify(
+      filters,
+    )}`;
+    if (sorter && sorter.column && sorter.order) {
+      url += `&sorter=${JSON.stringify({
+        field: sorter.column.key,
+        type: sorter.order === 'ascend' ? 'ASC' : 'DESC',
+      })}`;
+    }
+    if (viewConf) {
+      url += `&queryString=${JSON.stringify({
+        filters: viewConf.filters,
+        sorts: viewConf.sorts,
+        filterRelation: viewConf.filterRelation || 'and',
+      })}`;
+    }
     request
-      .get(`${config.apiPrefix}crons?searchValue=${searchText}`)
-      .then((data: any) => {
-        setValue(data.data.sort((a: any, b: any) => a.status - b.status));
+      .get(url)
+      .then(async ({ code, data: _data }) => {
+        if (code === 200) {
+          const { data, total } = _data;
+          const subscriptions = await request.get(
+            `${config.apiPrefix}subscriptions?ids=${JSON.stringify([
+              ...new Set(data.map((x) => x.sub_id).filter(Boolean)),
+            ])}`,
+            {
+              onError: noop,
+            },
+          );
+          const subscriptionMap = Object.fromEntries(
+            subscriptions?.data?.map((x) => [x.id, x]),
+          );
+
+          setValue(
+            data.map((x) => {
+              const scheduleType = getScheduleType(x.schedule);
+              const nextRunTime =
+                scheduleType === ScheduleType.Normal
+                  ? getCrontabsNextDate(x.schedule, x.extra_schedules)
+                  : null;
+              return {
+                ...x,
+                nextRunTime,
+                subscription: subscriptionMap?.[x.sub_id],
+              };
+            }),
+          );
+          setTotal(total);
+        }
       })
       .finally(() => setLoading(false));
   };
@@ -165,72 +428,95 @@ const Crontab = () => {
 
   const delCron = (record: any, index: number) => {
     Modal.confirm({
-      title: '确认删除',
+      title: intl.get('确认删除'),
       content: (
         <>
-          确认删除定时任务{' '}
+          {intl.get('确认删除定时任务')}{' '}
           <Text style={{ wordBreak: 'break-all' }} type="warning">
             {record.name}
           </Text>{' '}
-          吗
+          {intl.get('吗')}
         </>
       ),
       onOk() {
         request
-          .delete(`${config.apiPrefix}crons/${record._id}`)
-          .then((data: any) => {
-            if (data.code === 200) {
-              notification.success({
-                message: '删除成功',
-              });
+          .delete(`${config.apiPrefix}crons`, { data: [record.id] })
+          .then(({ code, data }) => {
+            if (code === 200) {
+              message.success(intl.get('删除成功'));
               const result = [...value];
-              result.splice(index, 1);
-              setValue(result);
-            } else {
-              notification.error({
-                message: data,
-              });
+              const i = result.findIndex((x) => x.id === record.id);
+              if (i !== -1) {
+                result.splice(i, 1);
+                setValue(result);
+              }
             }
           });
-      },
-      onCancel() {
-        console.log('Cancel');
       },
     });
   };
 
   const runCron = (record: any, index: number) => {
     Modal.confirm({
-      title: '确认运行',
+      title: intl.get('确认运行'),
       content: (
         <>
-          确认运行定时任务{' '}
+          {intl.get('确认运行定时任务')}{' '}
           <Text style={{ wordBreak: 'break-all' }} type="warning">
             {record.name}
           </Text>{' '}
-          吗
+          {intl.get('吗')}
         </>
       ),
       onOk() {
         request
-          .get(`${config.apiPrefix}crons/${record._id}/run`)
-          .then((data: any) => {
-            if (data.code === 200) {
+          .put(`${config.apiPrefix}crons/run`, [record.id])
+          .then(({ code, data }) => {
+            if (code === 200) {
               const result = [...value];
-              result.splice(index, 1, {
-                ...record,
-                status: CrontabStatus.running,
-              });
-              setValue(result);
-            } else {
-              notification.error({
-                message: data,
-              });
+              const i = result.findIndex((x) => x.id === record.id);
+              if (i !== -1) {
+                result.splice(i, 1, {
+                  ...record,
+                  status: CrontabStatus.running,
+                });
+                setValue(result);
+              }
             }
           });
       },
-      onCancel() {
-        console.log('Cancel');
+    });
+  };
+
+  const stopCron = (record: any, index: number) => {
+    Modal.confirm({
+      title: intl.get('确认停止'),
+      content: (
+        <>
+          {intl.get('确认停止定时任务')}{' '}
+          <Text style={{ wordBreak: 'break-all' }} type="warning">
+            {record.name}
+          </Text>{' '}
+          {intl.get('吗')}
+        </>
+      ),
+      onOk() {
+        request
+          .put(`${config.apiPrefix}crons/stop`, [record.id])
+          .then(({ code, data }) => {
+            if (code === 200) {
+              const result = [...value];
+              const i = result.findIndex((x) => x.id === record.id);
+              if (i !== -1) {
+                result.splice(i, 1, {
+                  ...record,
+                  pid: null,
+                  status: CrontabStatus.idle,
+                });
+                setValue(result);
+              }
+            }
+          });
       },
     });
   };
@@ -238,56 +524,104 @@ const Crontab = () => {
   const enabledOrDisabledCron = (record: any, index: number) => {
     Modal.confirm({
       title: `确认${
-        record.status === CrontabStatus.disabled ? '启用' : '禁用'
+        record.isDisabled === 1 ? intl.get('启用') : intl.get('禁用')
       }`,
       content: (
         <>
-          确认{record.status === CrontabStatus.disabled ? '启用' : '禁用'}
-          定时任务{' '}
+          {intl.get('确认')}
+          {record.isDisabled === 1 ? intl.get('启用') : intl.get('禁用')}
+          {intl.get('定时任务')}{' '}
           <Text style={{ wordBreak: 'break-all' }} type="warning">
             {record.name}
           </Text>{' '}
-          吗
+          {intl.get('吗')}
         </>
       ),
       onOk() {
         request
-          .get(
-            `${config.apiPrefix}crons/${record._id}/${
-              record.status === CrontabStatus.disabled ? 'enable' : 'disable'
+          .put(
+            `${config.apiPrefix}crons/${
+              record.isDisabled === 1 ? 'enable' : 'disable'
             }`,
-            {
-              data: { _id: record._id },
-            },
+            [record.id],
           )
-          .then((data: any) => {
-            if (data.code === 200) {
-              notification.success({
-                message: `${
-                  record.status === CrontabStatus.disabled ? '启用' : '禁用'
-                }成功`,
-              });
-              const newStatus =
-                record.status === CrontabStatus.disabled
-                  ? CrontabStatus.idle
-                  : CrontabStatus.disabled;
+          .then(({ code, data }) => {
+            if (code === 200) {
+              const newStatus = record.isDisabled === 1 ? 0 : 1;
               const result = [...value];
-              result.splice(index, 1, {
-                ...record,
-                status: newStatus,
-              });
-              setValue(result);
-            } else {
-              notification.error({
-                message: data,
-              });
+              const i = result.findIndex((x) => x.id === record.id);
+              if (i !== -1) {
+                result.splice(i, 1, {
+                  ...record,
+                  isDisabled: newStatus,
+                });
+                setValue(result);
+              }
             }
           });
       },
-      onCancel() {
-        console.log('Cancel');
+    });
+  };
+
+  const pinOrUnPinCron = (record: any, index: number) => {
+    Modal.confirm({
+      title: `确认${
+        record.isPinned === 1 ? intl.get('取消置顶') : intl.get('置顶')
+      }`,
+      content: (
+        <>
+          {intl.get('确认')}
+          {record.isPinned === 1 ? intl.get('取消置顶') : intl.get('置顶')}
+          {intl.get('定时任务')}{' '}
+          <Text style={{ wordBreak: 'break-all' }} type="warning">
+            {record.name}
+          </Text>{' '}
+          {intl.get('吗')}
+        </>
+      ),
+      onOk() {
+        request
+          .put(
+            `${config.apiPrefix}crons/${
+              record.isPinned === 1 ? 'unpin' : 'pin'
+            }`,
+            [record.id],
+          )
+          .then(({ code, data }) => {
+            if (code === 200) {
+              const newStatus = record.isPinned === 1 ? 0 : 1;
+              const result = [...value];
+              const i = result.findIndex((x) => x.id === record.id);
+              if (i !== -1) {
+                result.splice(i, 1, {
+                  ...record,
+                  isPinned: newStatus,
+                });
+                setValue(result);
+              }
+            }
+          });
       },
     });
+  };
+
+  const getMenuItems = (record: any) => {
+    return [
+      { label: intl.get('编辑'), key: 'edit', icon: <EditOutlined /> },
+      {
+        label: record.isDisabled === 1 ? intl.get('启用') : intl.get('禁用'),
+        key: 'enableOrDisable',
+        icon:
+          record.isDisabled === 1 ? <CheckCircleOutlined /> : <StopOutlined />,
+      },
+      { label: intl.get('复制'), key: 'copy', icon: <CopyOutlined /> },
+      { label: intl.get('删除'), key: 'delete', icon: <DeleteOutlined /> },
+      {
+        label: record.isPinned === 1 ? intl.get('取消置顶') : intl.get('置顶'),
+        key: 'pinOrUnPin',
+        icon: record.isPinned === 1 ? <StopOutlined /> : <PushpinOutlined />,
+      },
+    ];
   };
 
   const MoreBtn: React.FC<{
@@ -295,36 +629,17 @@ const Crontab = () => {
     index: number;
   }> = ({ record, index }) => (
     <Dropdown
-      arrow
-      trigger={['click', 'hover']}
-      overlay={
-        <Menu onClick={({ key }) => action(key, record, index)}>
-          <Menu.Item key="edit" icon={<EditOutlined />}>
-            编辑
-          </Menu.Item>
-          {record.isSystem !== 1 && (
-            <>
-              <Menu.Item
-                key="enableordisable"
-                icon={
-                  record.status === CrontabStatus.disabled ? (
-                    <CheckCircleOutlined />
-                  ) : (
-                    <StopOutlined />
-                  )
-                }
-              >
-                {record.status === CrontabStatus.disabled ? '启用' : '禁用'}
-              </Menu.Item>
-              <Menu.Item key="delete" icon={<DeleteOutlined />}>
-                删除
-              </Menu.Item>
-            </>
-          )}
-        </Menu>
-      }
+      placement="bottomRight"
+      trigger={['click']}
+      menu={{
+        items: getMenuItems(record),
+        onClick: ({ key, domEvent }) => {
+          domEvent.stopPropagation();
+          action(key, record, index);
+        },
+      }}
     >
-      <a>
+      <a onClick={(e) => e.stopPropagation()}>
         <EllipsisOutlined />
       </a>
     </Dropdown>
@@ -335,121 +650,393 @@ const Crontab = () => {
       case 'edit':
         editCron(record, index);
         break;
-      case 'enableordisable':
+      case 'copy':
+        editCron(omit(record, 'id'), index);
+        break;
+      case 'enableOrDisable':
         enabledOrDisabledCron(record, index);
         break;
       case 'delete':
         delCron(record, index);
+        break;
+      case 'pinOrUnPin':
+        pinOrUnPinCron(record, index);
         break;
       default:
         break;
     }
   };
 
-  const handleCancel = (cron?: any) => {
+  const handleCancel = () => {
     setIsModalVisible(false);
-    if (cron) {
-      handleCrons(cron);
-    }
+    getCrons();
   };
 
   const onSearch = (value: string) => {
-    setSearchText(value);
-  };
-
-  const handleCrons = (cron: any) => {
-    const index = value.findIndex((x) => x._id === cron._id);
-    const result = [...value];
-    if (index === -1) {
-      result.push(cron);
-    } else {
-      result.splice(index, 1, {
-        ...cron,
-      });
-    }
-    setValue(result);
+    setSearchText(value.trim());
   };
 
   const getCronDetail = (cron: any) => {
     request
-      .get(`${config.apiPrefix}crons/${cron._id}`)
-      .then((data: any) => {
-        const index = value.findIndex((x) => x._id === cron._id);
-        const result = [...value];
-        result.splice(index, 1, {
-          ...cron,
-          ...data.data,
-        });
-        setValue(result);
+      .get(`${config.apiPrefix}crons/${cron.id}`)
+      .then(({ code, data }) => {
+        if (code === 200) {
+          const index = value.findIndex((x) => x.id === cron.id);
+          const result = [...value];
+          data.nextRunTime = getCrontabsNextDate(
+            data.schedule,
+            data.extra_schedules,
+          );
+          if (index !== -1) {
+            result.splice(index, 1, {
+              ...cron,
+              ...data,
+            });
+            setValue(result);
+          }
+        }
       })
       .finally(() => setLoading(false));
   };
 
+  const onSelectChange = (selectedIds: any[]) => {
+    setSelectedRowIds(selectedIds);
+  };
+
+  const rowSelection = {
+    selectedRowKeys: selectedRowIds,
+    onChange: onSelectChange,
+  };
+
+  const delCrons = () => {
+    Modal.confirm({
+      title: intl.get('确认删除'),
+      content: <>{intl.get('确认删除选中的定时任务吗')}</>,
+      onOk() {
+        request
+          .delete(`${config.apiPrefix}crons`, { data: selectedRowIds })
+          .then(({ code, data }) => {
+            if (code === 200) {
+              message.success(intl.get('批量删除成功'));
+              setSelectedRowIds([]);
+              getCrons();
+            }
+          });
+      },
+    });
+  };
+
+  const operateCrons = (operationStatus: number) => {
+    Modal.confirm({
+      title: `确认${OperationName[operationStatus]}`,
+      content: (
+        <>
+          {intl.get('确认')}
+          {OperationName[operationStatus]}
+          {intl.get('选中的定时任务吗')}
+        </>
+      ),
+      onOk() {
+        request
+          .put(
+            `${config.apiPrefix}crons/${OperationPath[operationStatus]}`,
+            selectedRowIds,
+          )
+          .then(({ code, data }) => {
+            if (code === 200) {
+              getCrons();
+            }
+          });
+      },
+    });
+  };
+
+  const onPageChange = (
+    pagination: TablePaginationConfig,
+    filters: Record<string, FilterValue | null>,
+    sorter: SorterResult<any> | SorterResult<any>[],
+  ) => {
+    const { current, pageSize } = pagination;
+    setPageConf({
+      page: current as number,
+      size: pageSize as number,
+      sorter,
+      filters,
+    });
+    localStorage.setItem('pageSize', String(pageSize));
+  };
+
+  const getRowClassName = (record: any, index: number) => {
+    return record.isPinned ? 'pinned-cron cron' : 'cron';
+  };
+
   useEffect(() => {
     if (logCron) {
+      localStorage.setItem('logCron', logCron.id);
       setIsLogModalVisible(true);
     }
   }, [logCron]);
 
   useEffect(() => {
-    getCrons();
+    setPageConf({ ...pageConf, page: 1 });
   }, [searchText]);
 
   useEffect(() => {
-    if (document.body.clientWidth < 768) {
-      setWdith('auto');
-      setMarginLeft(0);
-      setMarginTop(0);
-    } else {
-      setWdith('100%');
-      setMarginLeft(0);
-      setMarginTop(-72);
+    if (pageConf.page && pageConf.size) {
+      getCrons();
     }
+    if (viewConf && viewConf.id) {
+      setActiveKey(viewConf.id);
+    }
+  }, [pageConf, viewConf]);
+
+  useEffect(() => {
+    if (viewConf && enabledCronViews && enabledCronViews.length > 0) {
+      const view = enabledCronViews
+        .slice(SHOW_TAB_COUNT)
+        .find((x) => x.id === viewConf.id);
+      setMoreMenuActive(!!view);
+    }
+  }, [viewConf, enabledCronViews]);
+
+  useEffect(() => {
+    getCronViews();
   }, []);
+
+  const viewAction = (key: string) => {
+    switch (key) {
+      case 'new':
+        setIsCreateViewModalVisible(true);
+        break;
+      case 'manage':
+        setIsViewManageModalVisible(true);
+        break;
+
+      default:
+        tabClick(key);
+        break;
+    }
+  };
+
+  const menu: MenuProps = {
+    onClick: ({ key, domEvent }) => {
+      domEvent.stopPropagation();
+      viewAction(key);
+    },
+    items: [
+      ...[...enabledCronViews].slice(SHOW_TAB_COUNT).map((x) => ({
+        label: (
+          <Space style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <span>{x.name}</span>
+            {viewConf?.id === x.id && (
+              <CheckOutlined style={{ color: '#1890ff' }} />
+            )}
+          </Space>
+        ),
+        key: x.id,
+        icon: <UnorderedListOutlined />,
+      })),
+      {
+        type: 'divider' as 'group',
+      },
+      {
+        label: intl.get('创建视图'),
+        key: 'new',
+        icon: <PlusOutlined />,
+      },
+      {
+        label: intl.get('视图管理'),
+        key: 'manage',
+        icon: <SettingOutlined />,
+      },
+    ],
+    style: {
+      maxHeight: 350,
+      overflowY: 'auto',
+    },
+  };
+
+  const getCronViews = () => {
+    setLoading(true);
+    request
+      .get(`${config.apiPrefix}crons/views`)
+      .then(({ code, data }) => {
+        if (code === 200) {
+          setCronViews(data);
+          const firstEnableView = data
+            .filter((x) => !x.isDisabled)
+            .map((x) => ({
+              ...x,
+              name: x.name === '全部任务' ? intl.get('全部任务') : x.name,
+            }));
+          setEnabledCronViews(firstEnableView);
+          setPageConf({
+            page: 1,
+            size: parseInt(localStorage.getItem('pageSize') || '20'),
+            sorter: {},
+            filters: {},
+          });
+          setViewConf({
+            ...firstEnableView[0],
+          });
+        }
+      })
+      .finally(() => {
+        setLoading(false);
+      });
+  };
+
+  const tabClick = (key: string) => {
+    const view = enabledCronViews.find((x) => x.id == key);
+    setSelectedRowIds([]);
+    setPageConf({ ...pageConf, page: 1 });
+    setViewConf(view ? view : null);
+  };
+
+  const [vt] = useVT(
+    () => ({ scroll: { y: tableScrollHeight } }),
+    [tableScrollHeight],
+  );
 
   return (
     <PageContainer
-      className="code-mirror-wrapper"
-      title="定时任务"
-      loading={loading}
+      className="ql-container-wrapper crontab-wrapper ql-container-wrapper-has-tab"
+      title={intl.get('定时任务')}
       extra={[
         <Search
-          placeholder="请输入名称或者关键词"
+          placeholder={intl.get('请输入名称或者关键词')}
           style={{ width: 'auto' }}
           enterButton
+          allowClear
           loading={loading}
+          value={searchValue}
+          onChange={(e) => setSearchValue(e.target.value)}
           onSearch={onSearch}
         />,
         <Button key="2" type="primary" onClick={() => addCron()}>
-          添加定时
+          {intl.get('创建任务')}
         </Button>,
       ]}
       header={{
-        style: {
-          padding: '4px 16px 4px 15px',
-          position: 'sticky',
-          top: 0,
-          left: 0,
-          zIndex: 20,
-          marginTop,
-          width,
-          marginLeft,
-        },
+        style: headerStyle,
       }}
     >
-      <Table
-        columns={columns}
-        pagination={{
-          hideOnSinglePage: true,
-          showSizeChanger: true,
-          defaultPageSize: 20,
-        }}
-        dataSource={value}
-        rowKey="_id"
-        size="middle"
-        bordered
-        scroll={{ x: 768 }}
+      <Tabs
+        defaultActiveKey="all"
+        size="small"
+        activeKey={activeKey}
+        tabPosition="top"
+        className={`crontab-view ${moreMenuActive ? 'more-active' : ''}`}
+        tabBarExtraContent={
+          <Dropdown
+            menu={menu}
+            trigger={['click']}
+            overlayStyle={{ minWidth: 200 }}
+          >
+            <div className={`view-more ${moreMenuActive ? 'active' : ''}`}>
+              <Space>
+                {intl.get('更多')}
+                <DownOutlined />
+              </Space>
+              <div className="ant-tabs-ink-bar ant-tabs-ink-bar-animated"></div>
+            </div>
+          </Dropdown>
+        }
+        onTabClick={tabClick}
+        items={[
+          ...[...enabledCronViews].slice(0, SHOW_TAB_COUNT).map((x) => ({
+            key: x.id,
+            label: x.name,
+          })),
+        ]}
       />
+      <div ref={tableRef}>
+        {selectedRowIds.length > 0 && (
+          <div style={{ marginBottom: 16 }}>
+            <Button
+              type="primary"
+              style={{ marginBottom: 5 }}
+              onClick={delCrons}
+            >
+              {intl.get('批量删除')}
+            </Button>
+            <Button
+              type="primary"
+              onClick={() => operateCrons(0)}
+              style={{ marginLeft: 8, marginBottom: 5 }}
+            >
+              {intl.get('批量启用')}
+            </Button>
+            <Button
+              type="primary"
+              onClick={() => operateCrons(1)}
+              style={{ marginLeft: 8, marginRight: 8 }}
+            >
+              {intl.get('批量禁用')}
+            </Button>
+            <Button
+              type="primary"
+              style={{ marginRight: 8 }}
+              onClick={() => operateCrons(2)}
+            >
+              {intl.get('批量运行')}
+            </Button>
+            <Button type="primary" onClick={() => operateCrons(3)}>
+              {intl.get('批量停止')}
+            </Button>
+            <Button
+              type="primary"
+              onClick={() => operateCrons(4)}
+              style={{ marginLeft: 8, marginRight: 8 }}
+            >
+              {intl.get('批量置顶')}
+            </Button>
+            <Button
+              type="primary"
+              onClick={() => operateCrons(5)}
+              style={{ marginLeft: 8, marginRight: 8 }}
+            >
+              {intl.get('批量取消置顶')}
+            </Button>
+            <Button
+              type="primary"
+              onClick={() => setIsLabelModalVisible(true)}
+              style={{ marginLeft: 8, marginRight: 8 }}
+            >
+              {intl.get('批量修改标签')}
+            </Button>
+            <span style={{ marginLeft: 8 }}>
+              {intl.get('已选择')}
+              <a>{selectedRowIds?.length}</a>
+              {intl.get('项')}
+            </span>
+          </div>
+        )}
+        <Table
+          columns={columns}
+          pagination={{
+            current: pageConf.page,
+            pageSize: pageConf.size,
+            showSizeChanger: true,
+            simple: isPhone,
+            total,
+            showTotal: (total: number, range: number[]) =>
+              `第 ${range[0]}-${range[1]} 条/总共 ${total} 条`,
+            pageSizeOptions: [10, 20, 50, 100, 200, 500, total || 10000].sort(
+              (a, b) => a - b,
+            ),
+          }}
+          dataSource={value}
+          rowKey="id"
+          size="middle"
+          scroll={{ x: 1200, y: tableScrollHeight }}
+          loading={loading}
+          rowSelection={rowSelection}
+          rowClassName={getRowClassName}
+          onChange={onPageChange}
+          components={isPhone || pageConf.size < 50 ? undefined : vt}
+        />
+      </div>
       <CronLogModal
         visible={isLogModalVisible}
         handleCancel={() => {
@@ -462,6 +1049,42 @@ const Crontab = () => {
         visible={isModalVisible}
         handleCancel={handleCancel}
         cron={editedCron}
+      />
+      <CronLabelModal
+        visible={isLabelModalVisible}
+        handleCancel={(needUpdate?: boolean) => {
+          setIsLabelModalVisible(false);
+          if (needUpdate) {
+            getCrons();
+          }
+        }}
+        ids={selectedRowIds}
+      />
+      <CronDetailModal
+        visible={isDetailModalVisible}
+        handleCancel={() => {
+          setIsDetailModalVisible(false);
+        }}
+        cron={detailCron}
+        theme={theme}
+        isPhone={isPhone}
+      />
+      <ViewCreateModal
+        visible={isCreateViewModalVisible}
+        handleCancel={(data) => {
+          setIsCreateViewModalVisible(false);
+          getCronViews();
+        }}
+      />
+      <ViewManageModal
+        cronViews={cronViews}
+        visible={isViewManageModalVisible}
+        handleCancel={() => {
+          setIsViewManageModalVisible(false);
+        }}
+        cronViewChange={(data) => {
+          getCronViews();
+        }}
       />
     </PageContainer>
   );

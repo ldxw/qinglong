@@ -1,0 +1,7 @@
+version: 2.18.3
+changeLogLink: https://t.me/jiao_long/427
+publishTime: 2025-03-15 08:00
+changeLog: |
+  1. 脚本管理和日志管理支持下载脚本和日志
+  2. 修复 gRPC client 连接超时
+  3. 脚本管理增加强制打开文件
