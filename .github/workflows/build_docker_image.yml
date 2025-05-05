@@ -9,8 +9,8 @@ on:
       - "develop"
     tags:
       - "v*"
-  schedule:
-    - cron: "00 20 * * *"
+ # schedule:
+ #   - cron: "00 20 * * *"
   workflow_dispatch:
 
 jobs:
